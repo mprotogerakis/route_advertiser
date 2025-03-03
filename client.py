@@ -1,189 +1,204 @@
-import socket
 import json
-import time
-import subprocess
 import logging
+import socket
+import subprocess
+import time
+import threading
 import typer
 import yaml
 from pathlib import Path
-from ipaddress import ip_network
-from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
 from Crypto.Signature import pkcs1_15
+from Crypto.Hash import SHA256
+import ipaddress
+import re
+import platform
+import binascii
+import ctypes
 
-# CLI-Framework initialisieren
+# CLI-Setup mit Typer
 app = typer.Typer()
 
-# Standardwerte für Konfiguration
-DEFAULT_CONFIG = {
-    "udp_port": 5005,
-    "listen_interface": "0.0.0.0",
-    "route_timeout": 300,
-    "public_key_file": "public.pem",
-    "log_file": "client.log",
-    "test_mode": False
-}
+# Konfigurationsdatei laden
+CONFIG_PATH = Path("client_config.yaml")
 
-CONFIG_FILE = Path("client_config.yaml")  # Datei umbenannt
+if CONFIG_PATH.exists():
+    with open(CONFIG_PATH, "r", encoding="utf-8") as file:
+        CONFIG = yaml.safe_load(file)
+else:
+    typer.echo("? Konfigurationsdatei client_config.yaml nicht gefunden!", err=True)
+    raise typer.Exit(code=1)
 
-def load_config():
-    """Lädt die Konfiguration aus einer YAML-Datei oder nutzt Standardwerte."""
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, "r") as f:
-            return yaml.safe_load(f)
-    else:
-        return DEFAULT_CONFIG
-
-CONFIG = load_config()
-
-# Logging einrichten
+# Logging konfigurieren (Unicode-kompatibel für Windows)
 logging.basicConfig(
-    level=logging.DEBUG if CONFIG.get("test_mode", False) else logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(CONFIG["log_file"]),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 
-# Lade den **öffentlichen** Schlüssel zur Verifikation der Signatur
-public_key_path = Path(CONFIG["public_key_file"])
-if not public_key_path.exists():
-    typer.echo(f"❌ Fehler: Public-Key Datei {CONFIG['public_key_file']} nicht gefunden!", err=True)
-    raise typer.Exit(1)
+# Prüfen, ob das Skript als Administrator ausgeführt wird
+def is_admin():
+    """Überprüft, ob das Skript mit Admin-Rechten läuft."""
+    if platform.system() == "Windows":
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    else:
+        return os.geteuid() == 0  # Linux: Prüfen, ob root
 
-with open(public_key_path, "rb") as f:
-    public_key = RSA.import_key(f.read())
+if not is_admin():
+    logging.error("? Fehler: Dieses Skript muss mit Administratorrechten ausgeführt werden!")
+    typer.echo("Bitte starten Sie das Skript als Administrator (Rechtsklick -> 'Als Administrator ausführen').")
+    raise typer.Exit(code=1)
 
-# Route-Speicher für Timeout-Handling
-active_routes = {}
+# Globale Variable für geplante Löschungen
+route_expiry = {}
 
-def verify_signature(data, signature):
-    """Überprüft die Signatur der empfangenen Routen."""
-    hash_obj = SHA256.new(data.encode())
-    signature_bytes = bytes.fromhex(signature)
-    
+def get_existing_routes():
+    """Liest die vorhandenen Routen aus dem System und gibt sie als Set im Format x.x.x.x/y zurück."""
+    existing_routes = set()
     try:
-        pkcs1_15.new(public_key).verify(hash_obj, signature_bytes)
-        return True
-    except (ValueError, TypeError):
+        if platform.system() == "Windows":
+            output = subprocess.check_output(["route", "print"], text=True, encoding="cp1252")
+            lines = output.splitlines()
+            for line in lines:
+                match = re.match(r"\s*(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)", line)
+                if match:
+                    network, netmask = match.groups()
+                    try:
+                        cidr_suffix = ipaddress.IPv4Network(f"0.0.0.0/{netmask}").prefixlen
+                        existing_routes.add(f"{network}/{cidr_suffix}")
+                    except ValueError:
+                        logging.warning(f"?? Ungültige Netzmaske: {netmask} für {network}")
+        else:
+            output = subprocess.check_output(["ip", "route", "show"], text=True, encoding="utf-8")
+            existing_routes = {line.split()[0] for line in output.splitlines() if "/" in line.split()[0]}
+        logging.debug(f"? Bekannte Routen: {existing_routes}")
+    except FileNotFoundError as e:
+        logging.error(f"? Fehler beim Abrufen der Routing-Tabelle: {e}")
+    except Exception as e:
+        logging.error(f"? Fehler beim Parsen der Routing-Tabelle: {e}")
+    return existing_routes
+
+def verify_signature(data, signature_hex, public_key_path):
+    """Überprüft eine digitale Signatur mit detailliertem Debugging"""
+    try:
+        with open(public_key_path, "rb") as key_file:
+            public_key = RSA.import_key(key_file.read())
+        h = SHA256.new(data.encode("utf-8"))
+        signature_bytes = binascii.unhexlify(signature_hex.strip())
+
+        try:
+            pkcs1_15.new(public_key).verify(h, signature_bytes)
+            logging.info("? Signatur ist gültig!")
+            return True
+        except ValueError:
+            logging.error("? Signaturprüfung fehlgeschlagen: Ungültige Signatur!")
+            return False
+
+    except FileNotFoundError:
+        logging.error("? Fehler: Public-Key-Datei nicht gefunden!")
+        return False
+    except Exception as e:
+        logging.error(f"? Unerwarteter Fehler während der Signaturprüfung: {e}")
         return False
 
-def is_route_reachable(subnet):
-    """Prüft, ob bereits eine Route zu diesem Subnetz existiert."""
-    try:
-        result = subprocess.run(["ip", "route", "show", subnet], capture_output=True, text=True, check=True)
-        return bool(result.stdout.strip())  # Wenn eine Route existiert, ist die Ausgabe nicht leer
-    except subprocess.CalledProcessError:
-        return False
-    
-def is_own_subnet(subnet):
-    """Prüft, ob der Client eine eigene IP im angegebenen Subnetz hat."""
-    try:
-        result = subprocess.run(["ip", "-o", "addr"], capture_output=True, text=True, check=True)
-        for line in result.stdout.split("\n"):
-            parts = line.split()
-            if len(parts) > 3 and "inet" in parts:
-                client_subnet = ip_network(parts[3], strict=False)  # Ermittelt das Subnetz der Interface-IP
-                if client_subnet.overlaps(ip_network(subnet, strict=False)):
-                    return True  # Der Client gehört zu diesem Subnetz
-    except subprocess.CalledProcessError:
-        pass
-    return False
-    
-def add_route(subnet, gateway, test_mode):
-    """Fügt eine Route nur hinzu, wenn sie bislang unerreichbar ist und nicht zum eigenen Subnetz gehört."""
-    if is_route_reachable(subnet):
-        logging.info(f"⚠️ Route {subnet} ist bereits erreichbar, wird nicht hinzugefügt.")
-        return
+def add_route(subnet, gateway, test_mode=False):
+    """Fügt eine Route hinzu, abhängig vom Betriebssystem."""
+    if platform.system() == "Windows":
+        cmd = f"route add {subnet} {gateway}"
+    else:
+        cmd = f"ip route add {subnet} via {gateway}"
 
-    if is_own_subnet(subnet):
-        logging.info(f"⚠️ Client gehört bereits zu {subnet}, Route wird nicht hinzugefügt.")
-        return
-
-    command = f"ip route add {subnet} via {gateway}"
-    
     if test_mode:
-        logging.info(f"TESTMODE: {command}")
+        logging.info(f"TESTMODE: {cmd}")
     else:
         try:
-            subprocess.run(command.split(), check=True)
-            logging.info(f"✅ Route hinzugefügt: {subnet} via {gateway}")
+            subprocess.run(cmd.split(), check=True)
+            logging.info(f"? Route hinzugefügt: {subnet} via {gateway}")
         except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Fehler beim Hinzufügen der Route {subnet}: {e}")
+            logging.error(f"? Fehler beim Hinzufügen der Route: {e}")
 
-def delete_route(subnet, test_mode):
-    """Löscht eine Route aus dem System."""
-    command = f"ip route del {subnet}"
-    
+def remove_route(subnet, gateway, test_mode=False):
+    """Entfernt eine Route, abhängig vom Betriebssystem."""
+    if platform.system() == "Windows":
+        cmd = f"route delete {subnet}"
+    else:
+        cmd = f"ip route del {subnet} via {gateway}"
+
     if test_mode:
-        logging.info(f"TESTMODE: Timeout erreicht. Route {subnet} würde jetzt entfernt.")
+        logging.info(f"TESTMODE: {cmd}")
     else:
         try:
-            subprocess.run(command.split(), check=True)
-            logging.info(f"✅ Route entfernt: {subnet}")
+            subprocess.run(cmd.split(), check=True)
+            logging.info(f"?? Route entfernt: {subnet}")
         except subprocess.CalledProcessError as e:
-            logging.error(f"❌ Fehler beim Entfernen der Route {subnet}: {e}")
+            logging.error(f"? Fehler beim Entfernen der Route: {e}")
 
-def listen_for_routes():
-    """Hört auf UDP-Broadcasts und verarbeitet Routen."""
+def schedule_route_removal(subnet, gateway, timeout, test_mode=False):
+    """Führt das Entfernen der Route nach einer Verzögerung aus, falls sie nicht erneut erhalten wurde."""
+    global route_expiry
+    expiry_time = time.time() + timeout
+    route_expiry[(subnet, gateway)] = expiry_time
+
+    def remove_route_thread():
+        time.sleep(timeout)
+        # Prüfen, ob die Route immer noch zur Entfernung vorgesehen ist
+        if (subnet, gateway) in route_expiry and route_expiry[(subnet, gateway)] == expiry_time:
+            remove_route(subnet, gateway, test_mode)
+            del route_expiry[(subnet, gateway)]  # Aus der Liste der geplanten Löschungen entfernen
+
+    threading.Thread(target=remove_route_thread, daemon=True).start()
+
+def listen_for_routes(test_mode=False):
+    """Lauscht auf UDP-Pakete und verarbeitet empfangene Routen."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((CONFIG["listen_interface"], CONFIG["udp_port"]))
+    sock.bind(("", CONFIG["udp_port"]))
 
-    logging.info(f"🎧 Lausche auf UDP-Port {CONFIG['udp_port']} für Routen-Updates...")
+    logging.info(f"? Lausche auf UDP-Port {CONFIG['udp_port']} für Routen-Updates...")
 
     while True:
-        data, addr = sock.recvfrom(4096)
-        logging.info(f"📩 Empfangene Daten von {addr}: {data.decode()}")
-
         try:
-            message = json.loads(data.decode())
+            data, addr = sock.recvfrom(4096)
+            decoded_data = json.loads(data.decode())
 
-            # Überprüfe die Signatur
-            if not verify_signature(json.dumps(message["routes"]), message["signature"]):
-                logging.error("❌ Signaturprüfung fehlgeschlagen! Nachricht ignoriert.")
+            signature = decoded_data.get("signature", "")
+            message_data = json.dumps(decoded_data["routes"], separators=(",", ":"), sort_keys=True)
+
+            if not verify_signature(message_data, signature, CONFIG["public_key_file"]):
+                logging.error("? Signaturprüfung fehlgeschlagen! Nachricht ignoriert.")
                 continue
 
-            # Routen verarbeiten
-            for route in message["routes"]:
+            logging.info(f"? Empfangene Daten von {addr}: {decoded_data}")
+
+            existing_routes = get_existing_routes()
+            for route in decoded_data["routes"]:
                 subnet = route["subnet"]
                 gateway = route["gateway"]
-                timeout = route.get("timeout", CONFIG["route_timeout"])
 
-                add_route(subnet, gateway, CONFIG["test_mode"])
+                if subnet in existing_routes:
+                    logging.info(f"? Route {subnet} ist bereits erreichbar, wird nicht hinzugefügt.")
+                    continue
 
-                # Speichere Route für spätere Entfernung
-                if CONFIG["test_mode"]:
-                    logging.info(f"TESTMODE: Route {subnet} wird für {timeout} Sekunden gespeichert.")
-                else:
-                    active_routes[subnet] = time.time() + timeout
+                add_route(subnet, gateway, test_mode)
+                timeout = route.get("timeout", 300)
+                schedule_route_removal(subnet, gateway, timeout, test_mode)
 
-        except json.JSONDecodeError:
-            logging.error("❌ Fehler beim Dekodieren der empfangenen Daten.")
+            logging.info("? Alle Routen erfolgreich verarbeitet.")
 
-        # Entferne abgelaufene Routen
-        current_time = time.time()
-        for subnet in list(active_routes.keys()):
-            if current_time > active_routes[subnet]:
-                delete_route(subnet, CONFIG["test_mode"])
-                del active_routes[subnet]
-
+        except KeyboardInterrupt:
+            logging.info("? Beende Route Listener...")
+            break
+        except Exception as e:
+            logging.error(f"? Fehler beim Empfangen von UDP-Paketen: {e}")
 
 @app.command()
 def start():
-    """Startet den Route Client und hört auf UDP-Broadcasts."""
-    listen_for_routes()
+    """Startet den Route-Client."""
+    listen_for_routes(test_mode=False)
 
 @app.command()
 def test():
-    """Startet den Route Client im Testmodus."""
-    CONFIG["test_mode"] = True
-    listen_for_routes()
-
-@app.command()
-def show_config():
-    """Zeigt die aktuelle Konfiguration an."""
-    typer.echo(yaml.dump(CONFIG, default_flow_style=False))
+    """Testmodus: Zeigt Befehle, führt sie aber nicht aus."""
+    listen_for_routes(test_mode=True)
 
 if __name__ == "__main__":
     app()

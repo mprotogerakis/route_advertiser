@@ -54,8 +54,15 @@ if not private_key_path.exists():
     typer.echo(f"❌ Fehler: Private-Key Datei {CONFIG['private_key_file']} nicht gefunden!", err=True)
     raise typer.Exit(1)
 
+import binascii
+
 with open(private_key_path, "rb") as f:
     private_key = RSA.import_key(f.read())
+    # Extrahiere den Public Key aus dem Private Key
+    public_key = private_key.publickey()
+    public_hex = binascii.hexlify(public_key.export_key()).decode()
+    typer.echo("\n🟢 Öffentlicher Schlüssel (HEX-Format, gekürzt):")
+    typer.echo(public_hex[:128] + "...")  # Nur ein Teil für Übersichtlichkeit
 
 def get_interfaces():
     """Ermittelt Netzwerkschnittstellen, IPs, Subnetze und Broadcast-Adressen."""
@@ -128,7 +135,9 @@ def get_routing_table():
 def sign_data(data):
     """Signiert JSON-Daten mit RSA."""
     hash_obj = SHA256.new(data.encode())
+    logging.info(f"SHA256-hash: {hash_obj.hexdigest()}")
     signature = pkcs1_15.new(private_key).sign(hash_obj)
+    
     return signature.hex()
 
 import socket
@@ -187,7 +196,8 @@ def send_routes():
                 logging.info(f"❌ Keine gültigen Routen für {interface}, überspringe Broadcast.")
                 continue
 
-            message = json.dumps({"routes": valid_routes, "signature": sign_data(json.dumps(valid_routes))})
+
+            message = json.dumps({"routes": valid_routes, "signature": sign_data(json.dumps(valid_routes, separators=(',', ':'), sort_keys=True))})
             sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
 
             logging.info(f"✅ Broadcast gesendet an {broadcast_ip}: {message}")
