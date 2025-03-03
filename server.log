@@ -1,0 +1,4 @@
+2025-03-02 20:28:24,658 - INFO - Route Broadcast Server gestartet
+2025-03-02 20:28:24,665 - ERROR - Fehler beim Auslesen der Routing-Tabelle: [Errno 2] No such file or directory: 'ip'
+2025-03-02 20:28:24,666 - ERROR - Fehler beim Ermitteln der Broadcast-Adressen: [Errno 2] No such file or directory: 'ip'
+2025-03-02 20:28:24,667 - WARNING - ⚠️ Keine gültigen Routen gefunden, überspringe Broadcast.

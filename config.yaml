@@ -1,0 +1,5 @@
+udp_port: 5005
+broadcast_interval: 30
+private_key_file: "private.pem"
+log_file: "server.log"
+debug: true
