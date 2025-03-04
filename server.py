@@ -156,8 +156,10 @@ def chunk_list(lst, chunk_size):
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
 
+from ipaddress import ip_network
+
 def send_routes():
-    """Broadcastet Routen in kleineren UDP-Paketen."""
+    """Broadcastet IPv4-Routen (keine IPv6) mit korrektem Gateway."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
@@ -180,40 +182,33 @@ def send_routes():
             time.sleep(CONFIG["broadcast_interval"])
             continue
 
-        max_routes_per_packet = 5  # Empirischer Wert
-
         for interface, data in interfaces.items():
-            broadcast_ip = data.get("broadcast")
-
-            # Falls kein Broadcast vorhanden ist (z. B. bei `lo0`), überspringen
-            if not broadcast_ip:
-                logging.warning(f"⚠️ Kein gültiges Broadcast-IP für {interface}, überspringe.")
-                continue
-
+            local_subnet = ip_network(data["subnet"], strict=False)
+            broadcast_ip = data["broadcast"]
             router_ip = data["gateway"]
 
-            local_subnet = ip_network(data["subnet"], strict=False)
+            if not broadcast_ip:
+                logging.warning(f"⚠️ Keine Broadcast-Adresse für {interface}, überspringe.")
+                continue
+
+            logging.info(f"🌐 Sende Routen auf {interface} → Broadcast: {broadcast_ip}")
+
+            # ❌ Filtere IPv6-Routen heraus (nur IPv4 erlaubt)
             valid_routes = [
                 {"subnet": route["subnet"], "gateway": router_ip, "timeout": 300}
                 for route in routes
-                if not ip_network(route["subnet"], strict=False).overlaps(local_subnet)
+                if not ":" in route["subnet"]  # Ausschluss von IPv6
+                and not ip_network(route["subnet"], strict=False).overlaps(local_subnet)
             ]
 
             if not valid_routes:
-                logging.info(f"❌ Keine gültigen Routen für {interface}, überspringe Broadcast.")
+                logging.info(f"❌ Keine gültigen IPv4-Routen für {interface}, überspringe Broadcast.")
                 continue
 
-            # Senden in kleineren Paketen
-            for chunk in chunk_list(valid_routes, max_routes_per_packet):
-                message = json.dumps({
-                    "routes": chunk,
-                    "signature": sign_data(json.dumps(chunk, separators=(',', ':'), sort_keys=True))
-                })
-                try:
-                    sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
-                    logging.info(f"✅ Broadcast gesendet an {broadcast_ip}: {message}")
-                except OSError as e:
-                    logging.error(f"❌ Fehler beim Senden des UDP-Pakets an {broadcast_ip}: {e}")
+            message = json.dumps({"routes": valid_routes, "signature": sign_data(json.dumps(valid_routes, separators=(',', ':'), sort_keys=True))})
+            sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
+
+            logging.info(f"✅ IPv4 Broadcast gesendet an {broadcast_ip}: {message}")
 
         time.sleep(CONFIG["broadcast_interval"])
 
