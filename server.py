@@ -43,6 +43,7 @@ def load_config(config_path: Path):
             return yaml.safe_load(f)
     return DEFAULT_CONFIG
 
+CONFIG = DEFAULT_CONFIG
 
 # Logging einrichten
 logging.basicConfig(
