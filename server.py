@@ -33,6 +33,8 @@ def load_config(config_path: Path):
             return yaml.safe_load(f)
     return DEFAULT_CONFIG
 
+from ipaddress import ip_network, ip_address
+
 def get_routing_table():
     """Ermittelt die IPv4-Routing-Tabelle für FreeBSD und OPNsense."""
     routes = []
@@ -64,9 +66,17 @@ def get_routing_table():
             if ":" in destination:
                 continue  
 
-            # Default-Route optional ignorieren oder als spezielle Route behandeln
+            # Default-Route optional ignorieren
             if destination == "default":
-                continue  # Falls `default` nicht gesendet werden soll, hier auskommentieren
+                continue
+
+            # Loopback-Routen zu 127.0.0.0/8 ignorieren
+            try:
+                if ip_address(destination).is_loopback:
+                    continue
+            except ValueError:
+                if ip_network(destination, strict=False).subnet_of(ip_network("127.0.0.0/8")):
+                    continue
 
             routes.append({"subnet": destination, "interface": interface, "timeout": 300})
 
