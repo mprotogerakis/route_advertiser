@@ -66,8 +66,18 @@ with open(private_key_path, "rb") as f:
     typer.echo("\n🟢 Öffentlicher Schlüssel (HEX-Format, gekürzt):")
     typer.echo(public_hex[:128] + "...")  # Nur ein Teil für Übersichtlichkeit
 
+def hex_to_netmask(hex_mask):
+    """Wandelt eine Netzmaske von hexadezimal nach dezimal um (z. B. 0xffffff00 → 255.255.255.0)"""
+    try:
+        hex_value = int(hex_mask, 16)  # Hexadezimal in Integer umwandeln
+        netmask = ".".join(str((hex_value >> (8 * i)) & 0xFF) for i in reversed(range(4)))  # In dezimale Punktnotation umwandeln
+        return netmask
+    except ValueError:
+        logging.error(f"❌ Ungültige Hex-Netzmaske: {hex_mask}")
+        return None
+
 def get_interfaces():
-    """Ermittelt Netzwerkschnittstellen, IPs und Subnetze für FreeBSD/Linux."""
+    """Ermittelt Netzwerkschnittstellen und ihre IP-Subnetzzuordnungen für Linux, macOS und FreeBSD/OPNsense"""
     interfaces = {}
 
     try:
@@ -77,42 +87,52 @@ def get_interfaces():
             lines = result.stdout.split("\n")
 
             interface = None
+
             for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+
                 if not line.startswith("\t"):
-                    interface = line.split(":")[0]  # Neues Interface erkannt
-                elif "inet " in line:
+                    interface = line.split(":")[0]
+
+                if "inet " in line and interface:
                     parts = line.split()
                     ip_addr = parts[1]
-                    netmask_hex = parts[3]
-                    netmask = str(ipaddress.IPv4Network(f"0.0.0.0/{netmask_hex}", strict=False).prefixlen)
-                    subnet = f"{ip_addr}/{netmask}"
+                    netmask_hex = parts[3]  # Netzmaske in Hexadezimalform
                     broadcast = parts[5] if "broadcast" in line else None
+                    netmask = hex_to_netmask(netmask_hex)
 
-                    interfaces[interface] = {
-                        "ip": ip_addr,
-                        "subnet": subnet,
-                        "broadcast": broadcast or ip_addr,
-                        "gateway": ip_addr,
-                    }
+                    if netmask:
+                        subnet = f"{ip_addr}/{ipaddress.IPv4Network(f'{ip_addr}/{netmask}', strict=False).prefixlen}"
+                        interfaces[interface] = {
+                            "ip": ip_addr,
+                            "subnet": subnet,
+                            "broadcast": broadcast,
+                            "gateway": ip_addr
+                        }
+                        logging.info(f"✅ Erkannte Schnittstelle: {interface}, IP: {ip_addr}, Subnetz: {subnet}, Broadcast: {broadcast}")
+
         else:
-            # Linux: Nutzt `ip -o addr`
+            # Linux/macOS: Nutzt `ip -o addr` oder `scutil --nwi` (macOS)
             result = subprocess.run(["ip", "-o", "addr"], capture_output=True, text=True, check=True)
             for line in result.stdout.split("\n"):
                 parts = line.split()
                 if len(parts) > 4 and "inet" in parts:
-                    interface = parts[1] if parts[1] != "inet" else parts[2]
+                    interface = parts[1]
                     ip_with_cidr = parts[3]
-                    if "." in ip_with_cidr:
-                        net = ip_interface(ip_with_cidr).network
-                        broadcast = str(net.broadcast_address)
-                        router_ip = ip_with_cidr.split('/')[0]
+                    net = ip_interface(ip_with_cidr).network
+                    broadcast = str(net.broadcast_address)
+                    router_ip = ip_with_cidr.split('/')[0]
 
-                        interfaces[interface] = {
-                            "ip": router_ip,
-                            "subnet": str(net),
-                            "broadcast": broadcast,
-                            "gateway": router_ip,
-                        }
+                    interfaces[interface] = {
+                        "ip": router_ip,
+                        "subnet": str(net),
+                        "broadcast": broadcast,
+                        "gateway": router_ip
+                    }
+                    logging.info(f"✅ Erkannte Schnittstelle: {interface}, IP: {router_ip}, Subnetz: {net}, Broadcast: {broadcast}")
+
     except subprocess.CalledProcessError as e:
         logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
 
