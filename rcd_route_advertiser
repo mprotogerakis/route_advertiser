@@ -1,0 +1,49 @@
+#!/bin/sh
+# touch /usr/local/etc/rc.d/route_advertiser
+# chmod +x /usr/local/etc/rc.d/route_advertiser
+# mkdir -p /usr/local/etc/rc.conf.d
+# echo 'route_advertiser_enable="YES"' > /usr/local/etc/rc.conf.d/route_advertiser
+# service route_advertiser start
+
+# PROVIDE: route_advertiser
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="route_advertiser"
+rcvar="route_advertiser_enable"
+pidfile="/var/run/${name}.pid"
+logfile="/var/log/${name}.log"
+
+# Anpassung an deine Installation
+venv_path="/root/route_advertiser/venv"
+script_path="/root/route_advertiser/server.py"
+command="${venv_path}/bin/python ${script_path} start"
+
+# Standardmäßige Konfigurationswerte setzen
+load_rc_config $name
+
+: ${route_advertiser_enable:="NO"}
+
+start_cmd="${name}_start"
+stop_cmd="${name}_stop"
+
+route_advertiser_start() {
+    echo "Starte ${name}..."
+    nohup ${command} > ${logfile} 2>&1 &
+    echo $! > ${pidfile}
+    echo "${name} gestartet."
+}
+
+route_advertiser_stop() {
+    echo "Stoppe ${name}..."
+    if [ -f "${pidfile}" ]; then
+        kill $(cat ${pidfile}) && rm -f ${pidfile}
+        echo "${name} gestoppt."
+    else
+        echo "PID-Datei nicht gefunden. Läuft der Dienst?"
+    fi
+}
+
+run_rc_command "$1"
