@@ -149,8 +149,15 @@ def sign_data(data):
     signature = pkcs1_15.new(private_key).sign(hash_obj)
     return signature.hex()
 
+import json
+
+def chunk_list(lst, chunk_size):
+    """Teilt eine Liste in kleinere Teile auf."""
+    for i in range(0, len(lst), chunk_size):
+        yield lst[i:i + chunk_size]
+
 def send_routes():
-    """Broadcastet Routen pro Subnetz mit korrektem Gateway."""
+    """Broadcastet Routen in kleineren UDP-Paketen."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
@@ -173,6 +180,8 @@ def send_routes():
             time.sleep(CONFIG["broadcast_interval"])
             continue
 
+        max_routes_per_packet = 5  # Empirischer Wert, um UDP-Fehler zu vermeiden
+
         for interface, data in interfaces.items():
             local_subnet = ip_network(data["subnet"], strict=False)
             broadcast_ip = data["broadcast"]
@@ -188,10 +197,17 @@ def send_routes():
                 logging.info(f"❌ Keine gültigen Routen für {interface}, überspringe Broadcast.")
                 continue
 
-            message = json.dumps({"routes": valid_routes, "signature": sign_data(json.dumps(valid_routes, separators=(',', ':'), sort_keys=True))})
-            sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
-
-            logging.info(f"✅ Broadcast gesendet an {broadcast_ip}: {message}")
+            # Aufteilen der Routenliste in kleinere Pakete
+            for chunk in chunk_list(valid_routes, max_routes_per_packet):
+                message = json.dumps({
+                    "routes": chunk,
+                    "signature": sign_data(json.dumps(chunk, separators=(',', ':'), sort_keys=True))
+                })
+                try:
+                    sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
+                    logging.info(f"✅ Broadcast gesendet an {broadcast_ip}: {message}")
+                except OSError as e:
+                    logging.error(f"❌ Fehler beim Senden des UDP-Pakets: {e}")
 
         time.sleep(CONFIG["broadcast_interval"])
 
