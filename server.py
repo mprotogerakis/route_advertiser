@@ -180,13 +180,19 @@ def send_routes():
             time.sleep(CONFIG["broadcast_interval"])
             continue
 
-        max_routes_per_packet = 5  # Empirischer Wert, um UDP-Fehler zu vermeiden
+        max_routes_per_packet = 5  # Empirischer Wert
 
         for interface, data in interfaces.items():
-            local_subnet = ip_network(data["subnet"], strict=False)
-            broadcast_ip = data["broadcast"]
+            broadcast_ip = data.get("broadcast")
+
+            # Falls kein Broadcast vorhanden ist (z. B. bei `lo0`), überspringen
+            if not broadcast_ip:
+                logging.warning(f"⚠️ Kein gültiges Broadcast-IP für {interface}, überspringe.")
+                continue
+
             router_ip = data["gateway"]
 
+            local_subnet = ip_network(data["subnet"], strict=False)
             valid_routes = [
                 {"subnet": route["subnet"], "gateway": router_ip, "timeout": 300}
                 for route in routes
@@ -197,7 +203,7 @@ def send_routes():
                 logging.info(f"❌ Keine gültigen Routen für {interface}, überspringe Broadcast.")
                 continue
 
-            # Aufteilen der Routenliste in kleinere Pakete
+            # Senden in kleineren Paketen
             for chunk in chunk_list(valid_routes, max_routes_per_packet):
                 message = json.dumps({
                     "routes": chunk,
@@ -207,7 +213,7 @@ def send_routes():
                     sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
                     logging.info(f"✅ Broadcast gesendet an {broadcast_ip}: {message}")
                 except OSError as e:
-                    logging.error(f"❌ Fehler beim Senden des UDP-Pakets: {e}")
+                    logging.error(f"❌ Fehler beim Senden des UDP-Pakets an {broadcast_ip}: {e}")
 
         time.sleep(CONFIG["broadcast_interval"])
 
