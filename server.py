@@ -5,19 +5,16 @@ import logging
 import subprocess
 import typer
 import yaml
-import platform
-from ipaddress import ip_network, ip_interface
+from pathlib import Path
+from ipaddress import ip_network
 from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
-from pathlib import Path
-import binascii
-import re
 
 # CLI-Framework initialisieren
 app = typer.Typer()
 
-# Standardwerte für Konfiguration
+# Standardwerte für die Konfiguration
 DEFAULT_CONFIG = {
     "udp_port": 5005,
     "broadcast_interval": 30,
@@ -26,15 +23,9 @@ DEFAULT_CONFIG = {
     "debug": False
 }
 
-# Optionale Konfigurationsdatei angeben
-@app.command()
-def start(config: Path = typer.Option("config.yaml", help="Pfad zur Konfigurationsdatei")):
-    """Startet den Route Broadcast Server mit einer optionalen Konfigurationsdatei"""
-    global CONFIG
-    CONFIG = load_config(config)
-    
-    logging.info("Route Broadcast Server gestartet")
-    send_routes()
+# **WICHTIG**: CONFIG erst innerhalb von `start()` laden!
+CONFIG = None  
+private_key = None  # Globaler Speicher für den Schlüssel
 
 def load_config(config_path: Path):
     """Lädt eine alternative Konfigurationsdatei, falls angegeben"""
@@ -43,127 +34,39 @@ def load_config(config_path: Path):
             return yaml.safe_load(f)
     return DEFAULT_CONFIG
 
-CONFIG = DEFAULT_CONFIG
+@app.command()
+def start(config: Path = typer.Option("config.yaml", help="Pfad zur Konfigurationsdatei")):
+    """Startet den Route Broadcast Server mit einer optionalen Konfigurationsdatei"""
+    global CONFIG, private_key
 
-# Logging einrichten
-logging.basicConfig(
-    level=logging.DEBUG if CONFIG["debug"] else logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(CONFIG["log_file"]),
-        logging.StreamHandler()
-    ]
-)
+    CONFIG = load_config(config)
 
-# Lade privaten Schlüssel für die Signatur der Routen
-private_key_path = Path(CONFIG["private_key_file"])
-if not private_key_path.exists():
-    typer.echo(f"❌ Fehler: Private-Key Datei {CONFIG['private_key_file']} nicht gefunden!", err=True)
-    raise typer.Exit(1)
+    # Logging erst hier initialisieren
+    logging.basicConfig(
+        level=logging.DEBUG if CONFIG["debug"] else logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(CONFIG["log_file"]),
+            logging.StreamHandler()
+        ]
+    )
 
-with open(private_key_path, "rb") as f:
-    private_key = RSA.import_key(f.read())
+    # Privaten Schlüssel laden
+    private_key_path = Path(CONFIG["private_key_file"])
+    if not private_key_path.exists():
+        logging.error(f"❌ Fehler: Private-Key Datei {CONFIG['private_key_file']} nicht gefunden!")
+        raise typer.Exit(1)
 
-def convert_netmask_to_cidr(netmask):
-    """Konvertiert eine Netzmaske in CIDR-Notation"""
-    if netmask.startswith("0x"):  # Hex-Notation (FreeBSD/OPNsense)
-        netmask = '.'.join(str(int(netmask[i:i+2], 16)) for i in range(2, 10, 2))
-    return str(ip_network(f"0.0.0.0/{netmask}").prefixlen)
+    with open(private_key_path, "rb") as f:
+        private_key = RSA.import_key(f.read())
 
-def get_interfaces():
-    """Ermittelt Netzwerkschnittstellen, IPs, Subnetze und Broadcast-Adressen für Linux und FreeBSD/OPNsense."""
-    interfaces = {}
-    try:
-        if "freebsd" in platform.system().lower():
-            # FreeBSD / OPNsense nutzt `ifconfig`
-            result = subprocess.run(["ifconfig"], capture_output=True, text=True, check=True)
-            lines = result.stdout.split("\n")
-
-            interface = None
-            for line in lines:
-                if not line.startswith("\t"):  # Neue Schnittstelle
-                    interface = line.split(":")[0]
-                elif "inet " in line and "netmask" in line:
-                    parts = line.split()
-                    ip_addr = parts[1]
-                    netmask_hex = parts[3]
-                    netmask = convert_netmask_to_cidr(netmask_hex)
-                    subnet = f"{ip_addr}/{netmask}"
-                    broadcast = parts[5] if "broadcast" in line else None
-
-                    interfaces[interface] = {
-                        "ip": ip_addr,
-                        "subnet": subnet,
-                        "broadcast": broadcast,
-                        "gateway": ip_addr
-                    }
-        else:
-            # Linux nutzt `ip -o addr`
-            result = subprocess.run(["ip", "-o", "addr"], capture_output=True, text=True, check=True)
-            for line in result.stdout.split("\n"):
-                parts = line.split()
-                if len(parts) > 4 and "inet" in parts:
-                    interface = parts[1]
-                    ip_with_cidr = parts[3]
-                    net = ip_interface(ip_with_cidr).network
-                    broadcast = str(net.broadcast_address)
-                    router_ip = ip_with_cidr.split('/')[0]
-
-                    interfaces[interface] = {
-                        "ip": router_ip,
-                        "subnet": str(net),
-                        "broadcast": broadcast,
-                        "gateway": router_ip
-                    }
-
-    except subprocess.CalledProcessError as e:
-        logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
-
-    return interfaces
-
-def get_routing_table():
-    """Liest die Routing-Tabelle aus und gibt erreichbare Subnetze zurück. Ignoriert die Default-Route."""
-    routes = []
-    try:
-        if "freebsd" in platform.system().lower():
-            result = subprocess.run(["netstat", "-rn"], capture_output=True, text=True, check=True)
-            lines = result.stdout.split("\n")
-
-            for line in lines:
-                parts = re.split(r'\s+', line.strip())
-                if len(parts) >= 3 and not parts[0].startswith("default"):
-                    subnet = parts[0]
-                    device = parts[-1]
-                    if "." in subnet:  # Nur IPv4-Routen speichern
-                        routes.append({"subnet": subnet, "interface": device, "timeout": 300})
-        else:
-            result = subprocess.run(["ip", "route"], capture_output=True, text=True, check=True)
-            for line in result.stdout.split("\n"):
-                parts = line.split()
-                if len(parts) >= 4 and parts[0] != "default":
-                    subnet = parts[0]
-                    device = parts[-1]
-                    routes.append({"subnet": subnet, "interface": device, "timeout": 300})
-
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Fehler beim Auslesen der Routing-Tabelle: {e}")
-
-    return routes
+    logging.info("✅ Route Broadcast Server gestartet")
+    send_routes()
 
 def sign_data(data):
     """Signiert JSON-Daten mit RSA."""
     hash_obj = SHA256.new(data.encode())
-    signature = pkcs1_15.new(private_key).sign(hash_obj)
-    return signature.hex()
-
-import json
-
-def chunk_list(lst, chunk_size):
-    """Teilt eine Liste in kleinere Teile auf."""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i:i + chunk_size]
-
-from ipaddress import ip_network
+    return pkcs1_15.new(private_key).sign(hash_obj).hex()
 
 def send_routes():
     """Broadcastet IPv4-Routen (keine IPv6) mit korrektem Gateway."""
@@ -201,37 +104,28 @@ def send_routes():
             logging.info(f"🌐 Sende Routen auf {interface} → Broadcast: {broadcast_ip}")
 
             # ❌ Filtere IPv6-Routen heraus (nur IPv4 erlaubt)
-            valid_routes = [
-                {"subnet": route["subnet"], "gateway": router_ip, "timeout": 300}
-                for route in routes
-                if not ":" in route["subnet"]  # Ausschluss von IPv6
-                and not ip_network(route["subnet"], strict=False).overlaps(local_subnet)
-            ]
+            valid_routes = []
+            for route in routes:
+                if ":" in route["subnet"]:
+                    logging.info(f"❌ Ignoriere IPv6-Route: {route['subnet']}")
+                    continue  # IPv6-Route überspringen
+                if ip_network(route["subnet"], strict=False).overlaps(local_subnet):
+                    continue
+                valid_routes.append({"subnet": route["subnet"], "gateway": router_ip, "timeout": 300})
 
             if not valid_routes:
                 logging.info(f"❌ Keine gültigen IPv4-Routen für {interface}, überspringe Broadcast.")
                 continue
 
-            message = json.dumps({"routes": valid_routes, "signature": sign_data(json.dumps(valid_routes, separators=(',', ':'), sort_keys=True))})
+            message = json.dumps({
+                "routes": valid_routes,
+                "signature": sign_data(json.dumps(valid_routes, separators=(',', ':'), sort_keys=True))
+            })
             sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
 
             logging.info(f"✅ IPv4 Broadcast gesendet an {broadcast_ip}: {message}")
 
         time.sleep(CONFIG["broadcast_interval"])
-
-
-
-@app.command()
-def show_interfaces():
-    """Zeigt erkannte Netzwerkschnittstellen und deren Subnetze"""
-    interfaces = get_interfaces()
-    typer.echo(yaml.dump(interfaces, default_flow_style=False))
-
-@app.command()
-def show_routes():
-    """Zeigt die erkannten Routen in der Routing-Tabelle"""
-    routes = get_routing_table()
-    typer.echo(yaml.dump(routes, default_flow_style=False))
 
 if __name__ == "__main__":
     app()
