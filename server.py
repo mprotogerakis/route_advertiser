@@ -12,6 +12,7 @@ from Crypto.PublicKey import RSA
 from pathlib import Path
 import subprocess
 import logging
+import platform  # <-- FEHLTE!
 from ipaddress import ip_network, ip_interface
 
 # CLI-Framework initialisieren
