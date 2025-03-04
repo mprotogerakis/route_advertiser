@@ -229,5 +229,20 @@ def show_routes():
     routes = get_routing_table()
     typer.echo(yaml.dump(routes, default_flow_style=False))
 
+@app.command()
+def show_interfaces():
+    """Zeigt erkannte Netzwerkschnittstellen und deren Subnetze"""
+    interfaces = get_interfaces()
+    typer.echo(yaml.dump(interfaces, default_flow_style=False))
+
+@app.command()
+def show_routes():
+    """Zeigt die erkannten Routen in der Routing-Tabelle"""
+    routes = get_routing_table()
+    typer.echo(yaml.dump(routes, default_flow_style=False))
+
+if __name__ == "__main__":
+    app()
+
 if __name__ == "__main__":
     app()
