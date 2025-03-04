@@ -65,45 +65,52 @@ with open(private_key_path, "rb") as f:
     typer.echo(public_hex[:128] + "...")  # Nur ein Teil für Übersichtlichkeit
 
 def get_interfaces():
-    """Ermittelt Netzwerkschnittstellen, IPs, Subnetze und Broadcast-Adressen."""
+    """Ermittelt Netzwerkschnittstellen, IPs und Subnetze für FreeBSD/Linux."""
     interfaces = {}
 
     try:
-        # Führe `ip -o addr` aus und bereinige die Ausgabe
-        result = subprocess.run(["ip", "-o", "addr"], capture_output=True, text=True, check=True)
-        logging.info(f"DEBUG: Raw Output:\n{result.stdout}")
+        if "freebsd" in platform.system().lower():
+            # FreeBSD / OPNsense: Nutzt `ifconfig`
+            result = subprocess.run(["ifconfig"], capture_output=True, text=True, check=True)
+            lines = result.stdout.split("\n")
 
-        # Verarbeite jede Zeile der Ausgabe
-        for line in result.stdout.split("\n"):
-            line = line.strip().replace("\\", "")  # Entferne `\`, die für Zeilenumbrüche stehen
-            logging.info(f"DEBUG: Processing line: {line}")
-
-            parts = line.split()
-
-            if len(parts) > 4 and "inet" in parts:
-                # Bestimme, an welcher Stelle der Interface-Name steht
-                if parts[1] == "inet":
-                    interface = parts[2]
-                else:
-                    interface = parts[1]
-
-                ip_with_cidr = parts[3]  # IP-Adresse mit CIDR-Notation
-
-                # Falls es sich um eine IPv4-Adresse handelt (ignoriert IPv6)
-                if "." in ip_with_cidr:
-                    net = ip_interface(ip_with_cidr).network  # Subnetz berechnen
-                    broadcast = str(net.broadcast_address)  # Broadcast-Adresse bestimmen
-                    router_ip = ip_with_cidr.split('/')[0]  # Eigene IP als Gateway
+            interface = None
+            for line in lines:
+                if not line.startswith("\t"):
+                    interface = line.split(":")[0]  # Neues Interface erkannt
+                elif "inet " in line:
+                    parts = line.split()
+                    ip_addr = parts[1]
+                    netmask_hex = parts[3]
+                    netmask = str(ipaddress.IPv4Network(f"0.0.0.0/{netmask_hex}", strict=False).prefixlen)
+                    subnet = f"{ip_addr}/{netmask}"
+                    broadcast = parts[5] if "broadcast" in line else None
 
                     interfaces[interface] = {
-                        "ip": router_ip,
-                        "subnet": str(net),
-                        "broadcast": broadcast,
-                        "gateway": router_ip
+                        "ip": ip_addr,
+                        "subnet": subnet,
+                        "broadcast": broadcast or ip_addr,
+                        "gateway": ip_addr,
                     }
+        else:
+            # Linux: Nutzt `ip -o addr`
+            result = subprocess.run(["ip", "-o", "addr"], capture_output=True, text=True, check=True)
+            for line in result.stdout.split("\n"):
+                parts = line.split()
+                if len(parts) > 4 and "inet" in parts:
+                    interface = parts[1] if parts[1] != "inet" else parts[2]
+                    ip_with_cidr = parts[3]
+                    if "." in ip_with_cidr:
+                        net = ip_interface(ip_with_cidr).network
+                        broadcast = str(net.broadcast_address)
+                        router_ip = ip_with_cidr.split('/')[0]
 
-                    logging.info(f"✅ Erkannte Schnittstelle: {interface}, IP: {router_ip}, Subnetz: {net}, Broadcast: {broadcast}")
-
+                        interfaces[interface] = {
+                            "ip": router_ip,
+                            "subnet": str(net),
+                            "broadcast": broadcast,
+                            "gateway": router_ip,
+                        }
     except subprocess.CalledProcessError as e:
         logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
 
