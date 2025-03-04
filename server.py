@@ -39,16 +39,35 @@ def get_routing_table():
     
     try:
         result = subprocess.run(["netstat", "-rn"], capture_output=True, text=True, check=True)
-        for line in result.stdout.split("\n"):
+        lines = result.stdout.split("\n")
+        
+        found_header = False
+        for line in lines:
             parts = line.split()
-            if len(parts) < 3:
-                continue
-            destination, gateway, *flags, interface = parts[:4]
+
+            # Header der Tabelle ignorieren
+            if len(parts) < 3 or "Destination" in parts[0] or "Flags" in parts[1]:
+                found_header = True
+                continue  # Header überspringen
             
-            # Nur IPv4-Routen speichern (keine IPv6-Adressen)
+            if not found_header:
+                continue  # Warte auf Header
+            
+            # Mindestens drei Spalten nötig: Zielnetz, Gateway, Interface
+            if len(parts) < 4:
+                continue
+
+            destination = parts[0]
+            interface = parts[-1]  # Letzte Spalte ist das Interface
+
+            # IPv6-Routen ignorieren
             if ":" in destination:
                 continue  
-            
+
+            # Default-Route optional ignorieren oder als spezielle Route behandeln
+            if destination == "default":
+                continue  # Falls `default` nicht gesendet werden soll, hier auskommentieren
+
             routes.append({"subnet": destination, "interface": interface, "timeout": 300})
 
     except subprocess.CalledProcessError as e:
