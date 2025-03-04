@@ -141,23 +141,47 @@ def get_interfaces():
 def get_routing_table():
     """
     Liest die Routing-Tabelle aus und gibt erreichbare Subnetze zurück.
-    Ignoriert die Default-Route.
+    - Linux/macOS: `ip route`
+    - FreeBSD/OPNsense: `netstat -rn`
     """
     routes = []
 
     try:
-        result = subprocess.run(["ip", "route"], capture_output=True, text=True, check=True)
-        logging.info(f"DEBUG: Routing-Tabelle:\n{result.stdout}")
+        if "freebsd" in platform.system().lower():
+            # FreeBSD / OPNsense: Nutzt `netstat -rn`
+            result = subprocess.run(["netstat", "-rn"], capture_output=True, text=True, check=True)
+            lines = result.stdout.split("\n")
 
-        for line in result.stdout.split("\n"):
-            parts = line.split()
-            if len(parts) >= 4 and parts[0] != "default":
+            for line in lines:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                
+                # Ignoriere die Default-Route
+                if parts[0] == "default":
+                    continue
+
                 subnet = parts[0]  # Ziel-Subnetz
-                device = parts[-1]  # Interface, über das das Subnetz erreichbar ist
-                routes.append({"subnet": subnet, "interface": device, "timeout": 300})
+                gateway = parts[1] if "link#" not in parts[1] else None
+                interface = parts[-1]  # Interface
+
+                # Prüfe, ob es eine gültige IPv4-Route ist
+                if "." in subnet and gateway:
+                    routes.append({"subnet": subnet, "interface": interface, "gateway": gateway, "timeout": 300})
+
+        else:
+            # Linux/macOS: Nutzt `ip route`
+            result = subprocess.run(["ip", "route"], capture_output=True, text=True, check=True)
+            for line in result.stdout.split("\n"):
+                parts = line.split()
+                if len(parts) >= 4 and parts[0] != "default":
+                    subnet = parts[0]  # Ziel-Subnetz
+                    gateway = parts[2]  # Gateway
+                    device = parts[-1]  # Interface
+                    routes.append({"subnet": subnet, "interface": device, "gateway": gateway, "timeout": 300})
 
     except subprocess.CalledProcessError as e:
-        logging.error(f"Fehler beim Auslesen der Routing-Tabelle: {e}")
+        logging.error(f"❌ Fehler beim Auslesen der Routing-Tabelle: {e}")
 
     return routes
 
