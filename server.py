@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import logging
 import platform  # <-- FEHLTE!
+import ipaddress  # <-- FEHLTE!
 from ipaddress import ip_network, ip_interface
 
 # CLI-Framework initialisieren
