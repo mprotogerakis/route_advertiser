@@ -12,10 +12,8 @@ from Crypto.Signature import pkcs1_15
 from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
 
-# CLI-Framework initialisieren
 app = typer.Typer()
 
-# Standardwerte für die Konfiguration
 DEFAULT_CONFIG = {
     "udp_port": 5005,
     "broadcast_interval": 30,
@@ -28,11 +26,60 @@ CONFIG = None
 private_key = None
 
 def load_config(config_path: Path):
-    """Lädt eine alternative Konfigurationsdatei, falls angegeben."""
+    """Lädt eine alternative Konfigurationsdatei, falls angegeben"""
     if config_path.exists():
         with open(config_path, "r") as f:
             return yaml.safe_load(f)
     return DEFAULT_CONFIG
+
+def get_routing_table():
+    """Ermittelt die IPv4-Routing-Tabelle für FreeBSD und OPNsense."""
+    routes = []
+    
+    try:
+        result = subprocess.run(["netstat", "-rn"], capture_output=True, text=True, check=True)
+        lines = result.stdout.split("\n")
+
+        found_header = False
+        for line in lines:
+            parts = line.split()
+
+            if len(parts) < 3 or "Destination" in parts[0] or "Flags" in parts[1]:
+                found_header = True
+                continue
+            
+            if not found_header or len(parts) < 4:
+                continue
+
+            destination = parts[0]
+            gateway = parts[1]
+            interface = parts[-1]  
+
+            if ":" in destination:  # IPv6 ignorieren
+                continue
+
+            if destination == "default":
+                continue
+
+            # "link#X" Einträge als Gateway ignorieren (ungültig für DHCP)
+            if gateway.startswith("link#"):
+                logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {destination} -> {gateway}")
+                continue
+
+            # Loopback-Routen ignorieren
+            try:
+                if ip_address(destination).is_loopback:
+                    continue
+            except ValueError:
+                if ip_network(destination, strict=False).subnet_of(ip_network("127.0.0.0/8")):
+                    continue
+
+            routes.append({"subnet": destination, "gateway": gateway, "interface": interface, "timeout": 300})
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"❌ Fehler beim Auslesen der Routing-Tabelle: {e}")
+
+    return routes
 
 def get_interfaces():
     """Ermittelt Netzwerkschnittstellen für FreeBSD/OPNsense."""
@@ -44,129 +91,31 @@ def get_interfaces():
         
         current_interface = None
         for line in lines:
-            if not line.startswith("\t"):  # Neue Interface-Zeile
+            if not line.startswith("\t"):  
                 current_interface = line.split(":")[0]
                 continue
 
             if "inet " in line and current_interface:
                 parts = line.split()
                 ip_addr = parts[1]
-                interfaces[current_interface] = ip_addr
+                netmask_hex = parts[3]
+                broadcast = parts[5] if "broadcast" in line else None
+
+                interfaces[current_interface] = {
+                    "ip": ip_addr,
+                    "subnet": f"{ip_addr}/24",
+                    "broadcast": broadcast,
+                    "gateway": ip_addr  
+                }
 
     except subprocess.CalledProcessError as e:
         logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
 
     return interfaces
 
-def get_routing_table():
-    """Ermittelt die IPv4-Routing-Tabelle für FreeBSD und OPNsense."""
-    routes = []
-    interfaces = get_interfaces()  # Lade Interface-IP-Adressen
-    
-    try:
-        result = subprocess.run(["netstat", "-rn"], capture_output=True, text=True, check=True)
-        lines = result.stdout.split("\n")
-        
-        found_header = False
-        for line in lines:
-            parts = line.split()
-
-            # Header der Tabelle ignorieren
-            if len(parts) < 3 or "Destination" in parts[0] or "Flags" in parts[1]:
-                found_header = True
-                continue
-            
-            if not found_header:
-                continue
-
-            # Mindestens drei Spalten nötig: Zielnetz, Gateway, Interface
-            if len(parts) < 4:
-                continue
-
-            destination = parts[0]
-            gateway = parts[1]
-            interface = parts[-1]
-
-            # IPv6-Routen ignorieren
-            if ":" in destination or ":" in gateway:
-                continue  
-
-            # Default-Route ignorieren
-            if destination == "default":
-                continue
-
-            # Loopback-Routen ignorieren
-            try:
-                if ip_address(destination).is_loopback:
-                    continue
-            except ValueError:
-                if ip_network(destination, strict=False).subnet_of(ip_network("127.0.0.0/8")):
-                    continue
-
-            # Gateways wie "link#X" durch Interface-IP ersetzen
-            if gateway.startswith("link#"):
-                if interface in interfaces:
-                    gateway = interfaces[interface]  # Ersetze mit der Interface-IP
-                else:
-                    logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {destination} -> {gateway} (kein passendes Interface gefunden)")
-                    continue
-
-            routes.append({"subnet": destination, "gateway": gateway, "interface": interface, "timeout": 300})
-
-    except subprocess.CalledProcessError as e:
-        logging.error(f"❌ Fehler beim Auslesen der Routing-Tabelle: {e}")
-
-    return routes
-
-def sign_data(data):
-    """Signiert JSON-Daten mit RSA."""
-    hash_obj = SHA256.new(data.encode())
-    return pkcs1_15.new(private_key).sign(hash_obj).hex()
-
-def send_routes():
-    """Broadcastet IPv4-Routen mit korrektem Gateway."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-    while True:
-        logging.info("🔄 `send_routes()` läuft...")
-
-        routes = get_routing_table()
-        interfaces = get_interfaces()
-
-        logging.info(f"🌍 Routen gefunden: {routes}")
-        logging.info(f"🌐 Interfaces erkannt: {interfaces}")
-
-        if not routes or not interfaces:
-            logging.warning("⚠️ Keine gültigen Routen oder Interfaces gefunden, überspringe Broadcast.")
-            time.sleep(CONFIG["broadcast_interval"])
-            continue
-
-        for interface, ip in interfaces.items():
-            broadcast_ip = ip  # Verwende Interface-IP als Broadcast (evtl. anpassen)
-            router_ip = ip  # Interface-IP als Gateway
-
-            valid_routes = [
-                {"subnet": route["subnet"], "gateway": router_ip, "timeout": 300}
-                for route in routes if route["subnet"] != router_ip
-            ]
-
-            if not valid_routes:
-                continue
-
-            message = json.dumps({
-                "routes": valid_routes,
-                "signature": sign_data(json.dumps(valid_routes, separators=(',', ':'), sort_keys=True))
-            })
-            sock.sendto(message.encode(), (broadcast_ip, CONFIG["udp_port"]))
-
-            logging.info(f"✅ IPv4 Broadcast gesendet an {broadcast_ip}: {message}")
-
-        time.sleep(CONFIG["broadcast_interval"])
-
 @app.command()
 def generate_121():
-    """Generiert den 121-DHCP-Optionen-String für OPNsense und zeigt eine Übersicht pro Interface."""
+    """Generiert den 121-DHCP-Optionen-String für OPNsense pro Interface."""
     routes = get_routing_table()
     interfaces = get_interfaces()
 
@@ -188,13 +137,11 @@ def generate_121():
 
             try:
                 net = IPv4Network(route_subnet, strict=False)
-                gateway = ip_address(router_ip)  # Verwende die Gateway-Adresse des Interfaces
+                gateway = ip_address(router_ip)
 
-                # Berechne die Anzahl der Netzmaske-Bits
                 netmask_bits = net.prefixlen
                 net_octets = net.network_address.packed
 
-                # Kürze die Netzadresse (RFC 3442 Compact Format)
                 significant_octets = net_octets[: (netmask_bits + 7) // 8]
                 route_str = f"{netmask_bits:02X}:" + ":".join(f"{b:02X}" for b in significant_octets) + ":" + ":".join(f"{b:02X}" for b in gateway.packed)
                 dhcp_121_entries.append(route_str)
@@ -235,7 +182,6 @@ def start(config: Path = typer.Option("config.yaml", help="Pfad zur Konfiguratio
         private_key = RSA.import_key(f.read())
 
     logging.info("✅ Route Broadcast Server gestartet")
-    send_routes()
 
 if __name__ == "__main__":
     app()
