@@ -166,26 +166,52 @@ def send_routes():
 
 @app.command()
 def generate_121():
-    """Generiert den 121-DHCP-Optionen-String für OPNsense."""
+    """Generiert den 121-DHCP-Optionen-String für OPNsense und zeigt eine Übersicht pro Interface."""
     routes = get_routing_table()
-    dhcp_121_entries = []
+    interfaces = get_interfaces()
+    
+    # Dictionary für die Interface-spezifischen Routen
+    routes_per_interface = {iface: [] for iface in interfaces}
 
+    # Routen den entsprechenden Interfaces zuordnen
     for route in routes:
-        try:
-            net = IPv4Network(route["subnet"], strict=False)
-            gateway = ip_address(route["gateway"])
-            netmask_bits = net.prefixlen
-            net_octets = net.network_address.packed
+        interface = route["interface"]
+        gateway = route["gateway"]
+        subnet = route["subnet"]
 
-            # Kürze die Netzadresse (RFC 3442 Compact Format)
-            significant_octets = net_octets[: (netmask_bits + 7) // 8]
-            dhcp_121_entries.append(f"{netmask_bits:02X}:" + ":".join(f"{b:02X}" for b in significant_octets) + ":" + ":".join(f"{b:02X}" for b in gateway.packed))
+        if interface in routes_per_interface:
+            routes_per_interface[interface].append({"subnet": subnet, "gateway": gateway})
+        else:
+            logging.warning(f"⚠️ Route konnte nicht zugeordnet werden: {route}")
 
-        except ValueError as e:
-            logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {route} ({e})")
+    print("\n=== DHCP Option 121 Konfiguration ===")
+    
+    for interface, interface_routes in routes_per_interface.items():
+        if not interface_routes:
+            continue
+        
+        print(f"\n🔹 **Interface {interface}**")
+        dhcp_121_entries = []
 
-    dhcp_121_string = ":".join(dhcp_121_entries)
-    print(dhcp_121_string)
+        for route in interface_routes:
+            try:
+                net = IPv4Network(route["subnet"], strict=False)
+                gateway = ip_address(route["gateway"])
+                netmask_bits = net.prefixlen
+                net_octets = net.network_address.packed
+
+                # Kürze die Netzadresse (RFC 3442 Compact Format)
+                significant_octets = net_octets[: (netmask_bits + 7) // 8]
+                route_str = f"{netmask_bits:02X}:" + ":".join(f"{b:02X}" for b in significant_octets) + ":" + ":".join(f"{b:02X}" for b in gateway.packed)
+                dhcp_121_entries.append(route_str)
+
+                print(f"  ➝ {route['subnet']} via {route['gateway']}")
+
+            except ValueError as e:
+                logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {route} ({e})")
+
+        dhcp_121_string = ":".join(dhcp_121_entries)
+        print(f"  📝 **Option 121 String**: {dhcp_121_string}")
 
 @app.command()
 def start(config: Path = typer.Option("config.yaml", help="Pfad zur Konfigurationsdatei")):
