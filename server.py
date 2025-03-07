@@ -45,6 +45,7 @@ def get_routing_table():
         for line in lines:
             parts = line.split()
 
+            # Header der Tabelle ignorieren
             if len(parts) < 3 or "Destination" in parts[0] or "Flags" in parts[1]:
                 found_header = True
                 continue  
@@ -56,14 +57,18 @@ def get_routing_table():
                 continue
 
             destination = parts[0]
-            interface = parts[-1]
+            gateway = parts[1]  # Gateway aus der zweiten Spalte
+            interface = parts[-1]  # Letzte Spalte ist das Interface
 
+            # IPv6-Routen ignorieren
             if ":" in destination:
                 continue  
 
+            # Default-Route optional ignorieren
             if destination == "default":
                 continue
 
+            # Loopback-Routen zu 127.0.0.0/8 ignorieren
             try:
                 if ip_address(destination).is_loopback:
                     continue
@@ -71,7 +76,7 @@ def get_routing_table():
                 if ip_network(destination, strict=False).subnet_of(ip_network("127.0.0.0/8")):
                     continue
 
-            routes.append({"subnet": destination, "interface": interface, "timeout": 300})
+            routes.append({"subnet": destination, "gateway": gateway, "interface": interface, "timeout": 300})
 
     except subprocess.CalledProcessError as e:
         logging.error(f"❌ Fehler beim Auslesen der Routing-Tabelle: {e}")
@@ -170,6 +175,10 @@ def generate_121_string():
     dhcp_121_entries = []
 
     for route in routes:
+        if "gateway" not in route:
+            logging.warning(f"⚠️ Route ohne Gateway übersprungen: {route}")
+            continue
+
         try:
             net = IPv4Network(route["subnet"], strict=False)
             gateway = ip_address(route["gateway"])
