@@ -169,34 +169,28 @@ def generate_121():
     """Generiert den 121-DHCP-Optionen-String für OPNsense und zeigt eine Übersicht pro Interface."""
     routes = get_routing_table()
     interfaces = get_interfaces()
-    
-    # Dictionary für die Interface-spezifischen Routen
-    routes_per_interface = {iface: [] for iface in interfaces}
-
-    # Routen den entsprechenden Interfaces zuordnen
-    for route in routes:
-        interface = route["interface"]
-        gateway = route["gateway"]
-        subnet = route["subnet"]
-
-        if interface in routes_per_interface:
-            routes_per_interface[interface].append({"subnet": subnet, "gateway": gateway})
-        else:
-            logging.warning(f"⚠️ Route konnte nicht zugeordnet werden: {route}")
 
     print("\n=== DHCP Option 121 Konfiguration ===")
-    
-    for interface, interface_routes in routes_per_interface.items():
-        if not interface_routes:
-            continue
-        
-        print(f"\n🔹 **Interface {interface}**")
-        dhcp_121_entries = []
 
-        for route in interface_routes:
+    for interface, data in interfaces.items():
+        local_subnet = ip_network(data["subnet"], strict=False)
+        router_ip = data["gateway"]
+        dhcp_121_entries = []
+        filtered_routes = []
+
+        for route in routes:
+            route_subnet = route["subnet"]
+            route_gateway = route["gateway"]
+
+            # Routen im gleichen Netz wie das Interface ignorieren
+            if ip_network(route_subnet, strict=False).overlaps(local_subnet):
+                continue
+
             try:
-                net = IPv4Network(route["subnet"], strict=False)
-                gateway = ip_address(route["gateway"])
+                net = IPv4Network(route_subnet, strict=False)
+                gateway = ip_address(router_ip)  # Verwende die Gateway-Adresse des Interfaces
+
+                # Berechne die Anzahl der Netzmaske-Bits
                 netmask_bits = net.prefixlen
                 net_octets = net.network_address.packed
 
@@ -205,13 +199,16 @@ def generate_121():
                 route_str = f"{netmask_bits:02X}:" + ":".join(f"{b:02X}" for b in significant_octets) + ":" + ":".join(f"{b:02X}" for b in gateway.packed)
                 dhcp_121_entries.append(route_str)
 
-                print(f"  ➝ {route['subnet']} via {route['gateway']}")
+                filtered_routes.append(f"  ➝ {route_subnet} via {router_ip}")
 
             except ValueError as e:
-                logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {route} ({e})")
+                logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {route_subnet} ({e})")
 
-        dhcp_121_string = ":".join(dhcp_121_entries)
-        print(f"  📝 **Option 121 String**: {dhcp_121_string}")
+        if dhcp_121_entries:
+            print(f"\n🔹 **Interface {interface} ({data['subnet']})**")
+            print("\n".join(filtered_routes))
+            dhcp_121_string = ":".join(dhcp_121_entries)
+            print(f"  📝 **Option 121 String**: {dhcp_121_string}")
 
 @app.command()
 def start(config: Path = typer.Option("config.yaml", help="Pfad zur Konfigurationsdatei")):
