@@ -92,4 +92,22 @@ def generate_121():
                 net = IPv4Network(route_network, strict=False)
                 gateway = ip_address(route_gateway)
 
-                # Berechne
+                # Berechne die Netzmaske-Bits
+                netmask_bits = net.prefixlen
+                net_octets = net.network_address.packed
+
+                # Kompakter RFC-3442-Format: Enthält nur relevante Oktetts
+                significant_octets = net_octets[: (netmask_bits + 7) // 8]
+                route_str = f"{netmask_bits:02X}:" + ":".join(f"{b:02X}" for b in significant_octets) + ":" + ":".join(f"{b:02X}" for b in gateway.packed)
+                dhcp_121_entries.append(route_str)
+
+                filtered_routes.append(f"  ➝ {route_network} via {route_gateway}")
+
+            except ValueError as e:
+                logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {route_network} ({e})")
+
+        if dhcp_121_entries:
+            print(f"\n🔹 **Interface {interface} ({data['subnet']})**")
+            print("\n".join(filtered_routes))
+            dhcp_121_string = ":".join(dhcp_121_entries)
+            print(f"  📝 **Option 121 String**: {dhcp_121_string}")
