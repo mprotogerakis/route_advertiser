@@ -33,7 +33,7 @@ def load_config(config_path: Path):
     return DEFAULT_CONFIG
 
 def get_routing_table():
-    """Ermittelt die IPv4-Routing-Tabelle für FreeBSD und OPNsense."""
+    """Ermittelt nur IPv4-Routen mit `U`-Flag für FreeBSD/OPNsense."""
     routes = []
     
     try:
@@ -53,20 +53,22 @@ def get_routing_table():
 
             destination = parts[0]
             gateway = parts[1]
-            interface = parts[-1]  
+            flags = parts[2]
+            interface = parts[-1]
 
             if ":" in destination:  # IPv6 ignorieren
+                continue
+
+            if "U" not in flags:  # Nur Routen mit `U`-Flag
                 continue
 
             if destination == "default":
                 continue
 
-            # "link#X" Einträge als Gateway ignorieren (ungültig für DHCP)
             if gateway.startswith("link#"):
                 logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {destination} -> {gateway}")
                 continue
 
-            # Loopback-Routen ignorieren
             try:
                 if ip_address(destination).is_loopback:
                     continue
