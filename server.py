@@ -65,16 +65,9 @@ def get_routing_table():
             if destination == "default":
                 continue
 
+            # Falls das Gateway "link#X" ist, dann ersetzt es mit der Interface-IP
             if gateway.startswith("link#"):
-                logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {destination} -> {gateway}")
-                continue
-
-            try:
-                if ip_address(destination).is_loopback:
-                    continue
-            except ValueError:
-                if ip_network(destination, strict=False).subnet_of(ip_network("127.0.0.0/8")):
-                    continue
+                gateway = None  # Erst mal als None setzen, wird später ersetzt
 
             routes.append({"subnet": destination, "gateway": gateway, "interface": interface, "timeout": 300})
 
@@ -132,13 +125,17 @@ def generate_121():
             route_subnet = route["subnet"]
             route_gateway = route["gateway"]
 
+            # Falls kein explizites Gateway vorhanden ist (z.B. `link#X` vorher ersetzt), Interface-IP nehmen
+            if not route_gateway:
+                route_gateway = data["ip"]
+
             # Nur Netzwerke außerhalb des eigenen Interface-Subnetzes aufnehmen
             if ip_network(route_subnet, strict=False).overlaps(local_subnet):
                 continue
 
             try:
                 net = IPv4Network(route_subnet, strict=False)
-                gateway = ip_address(router_ip)
+                gateway = ip_address(route_gateway)
 
                 netmask_bits = net.prefixlen
                 net_octets = net.network_address.packed
@@ -147,7 +144,7 @@ def generate_121():
                 route_str = f"{netmask_bits:02X}:" + ":".join(f"{b:02X}" for b in significant_octets) + ":" + ":".join(f"{b:02X}" for b in gateway.packed)
                 dhcp_121_entries.append(route_str)
 
-                filtered_routes.append(f"  ➝ {route_subnet} via {router_ip}")
+                filtered_routes.append(f"  ➝ {route_subnet} via {route_gateway}")
 
             except ValueError as e:
                 logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {route_subnet} ({e})")
