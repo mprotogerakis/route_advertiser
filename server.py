@@ -34,9 +34,34 @@ def load_config(config_path: Path):
             return yaml.safe_load(f)
     return DEFAULT_CONFIG
 
+def get_interfaces():
+    """Ermittelt Netzwerkschnittstellen für FreeBSD/OPNsense."""
+    interfaces = {}
+
+    try:
+        result = subprocess.run(["ifconfig"], capture_output=True, text=True, check=True)
+        lines = result.stdout.split("\n")
+        
+        current_interface = None
+        for line in lines:
+            if not line.startswith("\t"):  # Neue Interface-Zeile
+                current_interface = line.split(":")[0]
+                continue
+
+            if "inet " in line and current_interface:
+                parts = line.split()
+                ip_addr = parts[1]
+                interfaces[current_interface] = ip_addr
+
+    except subprocess.CalledProcessError as e:
+        logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
+
+    return interfaces
+
 def get_routing_table():
     """Ermittelt die IPv4-Routing-Tabelle für FreeBSD und OPNsense."""
     routes = []
+    interfaces = get_interfaces()  # Lade Interface-IP-Adressen
     
     try:
         result = subprocess.run(["netstat", "-rn"], capture_output=True, text=True, check=True)
@@ -78,10 +103,13 @@ def get_routing_table():
                 if ip_network(destination, strict=False).subnet_of(ip_network("127.0.0.0/8")):
                     continue
 
-            # Gateways wie "link#X" ignorieren
+            # Gateways wie "link#X" durch Interface-IP ersetzen
             if gateway.startswith("link#"):
-                logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {destination} -> {gateway}")
-                continue
+                if interface in interfaces:
+                    gateway = interfaces[interface]  # Ersetze mit der Interface-IP
+                else:
+                    logging.warning(f"⚠️ Fehlerhafte Route übersprungen: {destination} -> {gateway} (kein passendes Interface gefunden)")
+                    continue
 
             routes.append({"subnet": destination, "gateway": gateway, "interface": interface, "timeout": 300})
 
@@ -89,37 +117,6 @@ def get_routing_table():
         logging.error(f"❌ Fehler beim Auslesen der Routing-Tabelle: {e}")
 
     return routes
-
-def get_interfaces():
-    """Ermittelt Netzwerkschnittstellen für FreeBSD/OPNsense."""
-    interfaces = {}
-
-    try:
-        result = subprocess.run(["ifconfig"], capture_output=True, text=True, check=True)
-        lines = result.stdout.split("\n")
-        
-        current_interface = None
-        for line in lines:
-            if not line.startswith("\t"):  # Neue Interface-Zeile
-                current_interface = line.split(":")[0]
-                continue
-
-            if "inet " in line and current_interface:
-                parts = line.split()
-                ip_addr = parts[1]
-                broadcast = parts[5] if "broadcast" in line else None
-
-                interfaces[current_interface] = {
-                    "ip": ip_addr,
-                    "subnet": f"{ip_addr}/24",
-                    "broadcast": broadcast,
-                    "gateway": ip_addr
-                }
-
-    except subprocess.CalledProcessError as e:
-        logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
-
-    return interfaces
 
 def sign_data(data):
     """Signiert JSON-Daten mit RSA."""
@@ -145,22 +142,14 @@ def send_routes():
             time.sleep(CONFIG["broadcast_interval"])
             continue
 
-        for interface, data in interfaces.items():
-            local_subnet = ip_network(data["subnet"], strict=False)
-            broadcast_ip = data["broadcast"]
-            router_ip = data["gateway"]
+        for interface, ip in interfaces.items():
+            broadcast_ip = ip  # Verwende Interface-IP als Broadcast (evtl. anpassen)
+            router_ip = ip  # Interface-IP als Gateway
 
-            if not broadcast_ip:
-                logging.warning(f"⚠️ Keine Broadcast-Adresse für {interface}, überspringe.")
-                continue
-
-            valid_routes = []
-            for route in routes:
-                if ":" in route["subnet"]:  # IPv6 ignorieren
-                    continue
-                if ip_network(route["subnet"], strict=False).overlaps(local_subnet):
-                    continue
-                valid_routes.append({"subnet": route["subnet"], "gateway": router_ip, "timeout": 300})
+            valid_routes = [
+                {"subnet": route["subnet"], "gateway": router_ip, "timeout": 300}
+                for route in routes if route["subnet"] != router_ip
+            ]
 
             if not valid_routes:
                 continue
