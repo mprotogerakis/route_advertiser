@@ -31,6 +31,11 @@ def load_config(config_path: Path):
             return yaml.safe_load(f)
     return DEFAULT_CONFIG
 
+def hex_to_netmask(hex_mask):
+    """Konvertiert eine hexadezimale Netzmaske in eine Präfixlänge."""
+    hex_mask = int(hex_mask, 16)  # Hex-String in Integer umwandeln
+    return bin(hex_mask).count("1")  # Anzahl gesetzter Bits als Prefix-Länge
+
 def get_interfaces_and_subnets():
     """Liest die Netzwerkschnittstellen & Subnetze aus `ifconfig`."""
     interfaces = {}
@@ -48,11 +53,16 @@ def get_interfaces_and_subnets():
             if "inet " in line and current_interface:
                 parts = line.split()
                 ip_addr = parts[1]
-                netmask_hex = parts[3]
+                netmask_hex = parts[3]  # FreeBSD gibt Netzmaske als 0xffffff00 aus
                 broadcast = parts[5] if "broadcast" in line else None
 
-                # Netzmaske umwandeln
-                netmask_bits = sum(bin(int(x, 16)).count("1") for x in netmask_hex.split("."))
+                # Netzmaske richtig berechnen
+                try:
+                    netmask_bits = hex_to_netmask(netmask_hex)
+                except ValueError:
+                    logging.warning(f"⚠️ Ungültige Netzmaske für {current_interface}: {netmask_hex}")
+                    continue
+
                 subnet = f"{ip_addr}/{netmask_bits}"
                 network = str(ip_network(subnet, strict=False).network_address)
 
@@ -62,7 +72,6 @@ def get_interfaces_and_subnets():
                     "network": f"{network}/{netmask_bits}",
                     "broadcast": broadcast
                 }
-
     except subprocess.CalledProcessError as e:
         logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
 
@@ -72,6 +81,11 @@ def get_interfaces_and_subnets():
 def generate_121():
     """Generiert den 121-DHCP-Optionen-String für OPNsense pro Interface."""
     interfaces = get_interfaces_and_subnets()
+
+    if not interfaces:
+        print("❌ Keine gültigen Interfaces gefunden.")
+        return
+
     print("\n=== DHCP Option 121 Konfiguration ===")
 
     for interface, data in interfaces.items():
@@ -111,3 +125,6 @@ def generate_121():
             print("\n".join(filtered_routes))
             dhcp_121_string = ":".join(dhcp_121_entries)
             print(f"  📝 **Option 121 String**: {dhcp_121_string}")
+
+if __name__ == "__main__":
+    app()
