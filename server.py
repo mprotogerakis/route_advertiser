@@ -77,7 +77,7 @@ def get_interfaces_and_subnets():
 
     return interfaces
 
-@app.command()
+@app.command(name="generate-121")
 def generate_121():
     """Generiert den 121-DHCP-Optionen-String für OPNsense pro Interface."""
     interfaces = get_interfaces_and_subnets()
