@@ -59,15 +59,14 @@ def get_routing_table():
             if ":" in destination:  # IPv6 ignorieren
                 continue
 
-            if flags != "U":  # Nur Routen mit genau `U`-Flag
+            if flags != "U":  # Nur Routen mit genau `U`-Flag (keine Host-Routen)
                 continue
 
             if destination == "default":
                 continue
 
-            # Falls das Gateway "link#X" ist, dann ersetzt es mit der Interface-IP
             if gateway.startswith("link#"):
-                gateway = None  # Erst mal als None setzen, wird später ersetzt
+                gateway = None  # Wird später durch Interface-IP ersetzt
 
             routes.append({"subnet": destination, "gateway": gateway, "interface": interface, "timeout": 300})
 
@@ -77,8 +76,9 @@ def get_routing_table():
     return routes
 
 def get_interfaces():
-    """Ermittelt Netzwerkschnittstellen für FreeBSD/OPNsense."""
+    """Ermittelt Netzwerkschnittstellen & direkt verbundene Subnetze aus `ifconfig`."""
     interfaces = {}
+    directly_connected_subnets = {}
 
     try:
         result = subprocess.run(["ifconfig"], capture_output=True, text=True, check=True)
@@ -93,25 +93,33 @@ def get_interfaces():
             if "inet " in line and current_interface:
                 parts = line.split()
                 ip_addr = parts[1]
+                netmask_hex = parts[3]
                 broadcast = parts[5] if "broadcast" in line else None
+
+                # Netzmaske konvertieren
+                netmask_bits = sum(bin(int(x, 16)).count("1") for x in netmask_hex.split("."))
+                subnet = f"{ip_addr}/{netmask_bits}"
 
                 interfaces[current_interface] = {
                     "ip": ip_addr,
-                    "subnet": f"{ip_addr}/24",
+                    "subnet": subnet,
                     "broadcast": broadcast,
-                    "gateway": ip_addr  
+                    "gateway": ip_addr  # Standardmäßig nimmt das Interface seine eigene IP als Gateway
                 }
+
+                # Direkt verbundene Subnetze speichern
+                directly_connected_subnets[subnet] = current_interface
 
     except subprocess.CalledProcessError as e:
         logging.error(f"❌ Fehler beim Ermitteln der Netzwerkschnittstellen: {e}")
 
-    return interfaces
+    return interfaces, directly_connected_subnets
 
 @app.command()
 def generate_121():
     """Generiert den 121-DHCP-Optionen-String für OPNsense pro Interface."""
     routes = get_routing_table()
-    interfaces = get_interfaces()
+    interfaces, directly_connected_subnets = get_interfaces()
 
     print("\n=== DHCP Option 121 Konfiguration ===")
 
@@ -128,6 +136,11 @@ def generate_121():
             # Falls kein explizites Gateway vorhanden ist (z.B. `link#X` vorher ersetzt), Interface-IP nehmen
             if not route_gateway:
                 route_gateway = data["ip"]
+
+            # Direkt verbundene Subnetze aus `ifconfig` hinzufügen, falls in `netstat -rn` nicht vorhanden
+            if route_subnet not in directly_connected_subnets:
+                if route_subnet in directly_connected_subnets:
+                    route_gateway = interfaces[directly_connected_subnets[route_subnet]]["ip"]
 
             # Nur Netzwerke außerhalb des eigenen Interface-Subnetzes aufnehmen
             if ip_network(route_subnet, strict=False).overlaps(local_subnet):
