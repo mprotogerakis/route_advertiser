@@ -33,7 +33,7 @@ def load_config(config_path: Path):
     return DEFAULT_CONFIG
 
 def get_routing_table():
-    """Ermittelt nur IPv4-Routen mit `U`-Flag für FreeBSD/OPNsense."""
+    """Ermittelt nur Netz-Routen (`U`-Flag) für FreeBSD/OPNsense."""
     routes = []
     
     try:
@@ -59,7 +59,7 @@ def get_routing_table():
             if ":" in destination:  # IPv6 ignorieren
                 continue
 
-            if "U" not in flags:  # Nur Routen mit `U`-Flag
+            if flags != "U":  # Nur Routen mit genau `U`-Flag
                 continue
 
             if destination == "default":
@@ -100,7 +100,6 @@ def get_interfaces():
             if "inet " in line and current_interface:
                 parts = line.split()
                 ip_addr = parts[1]
-                netmask_hex = parts[3]
                 broadcast = parts[5] if "broadcast" in line else None
 
                 interfaces[current_interface] = {
@@ -133,7 +132,7 @@ def generate_121():
             route_subnet = route["subnet"]
             route_gateway = route["gateway"]
 
-            # Routen im gleichen Netz wie das Interface ignorieren
+            # Nur Netzwerke außerhalb des eigenen Interface-Subnetzes aufnehmen
             if ip_network(route_subnet, strict=False).overlaps(local_subnet):
                 continue
 
